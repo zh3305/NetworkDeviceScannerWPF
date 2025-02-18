@@ -1,0 +1,58 @@
+﻿<Window x:Class="NetworkDeviceScannerWPF.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:NetworkDeviceScannerWPF" 
+        xmlns:viewmodels="clr-namespace:NetworkDeviceScannerWPF.ViewModels" 
+        d:DataContext="{d:DesignInstance Type=viewmodels:MainViewModel}"
+        mc:Ignorable="d"
+        Title="网络设备扫描器" Height="650" Width="1000">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <ComboBox x:Name="NetworkInterfacesCombo" 
+                      Width="200" 
+                      Margin="0,0,10,0"
+                      ItemsSource="{Binding NetworkInterfaces}"
+                      SelectedItem="{Binding SelectedInterface}"
+                      DisplayMemberPath="Description"/>
+            <Button Content="{Binding ScanButtonText}"
+                    Width="100" 
+                    Margin="0,0,10,0"
+                    Command="{Binding ScanCommand}"/>
+            <Button Content="保存" 
+                    Width="100" 
+                    Margin="0,0,10,0"
+                    Command="{Binding SaveCommand}"/>
+            <TextBlock Text="{Binding StatusText}" 
+                      VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="1" 
+                  ItemsSource="{Binding Devices}"
+                  AutoGenerateColumns="False" 
+                  IsReadOnly="True">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="设备名称" Binding="{Binding Name}" IsReadOnly="True"/>
+                <DataGridTextColumn Header="IP地址" Binding="{Binding IP}" IsReadOnly="True"/>
+                <DataGridTextColumn Header="MAC地址" Binding="{Binding MAC}" IsReadOnly="True"/>
+                <DataGridCheckBoxColumn Header="在线状态" Binding="{Binding IsOnline}" IsReadOnly="True"/>
+                <DataGridTextColumn Header="自定义名称" Binding="{Binding CustomName}"/>
+                <DataGridTextColumn Header="位置" Binding="{Binding Location}"/>
+                <DataGridTextColumn Header="最后发现时间" Binding="{Binding LastSeen}" IsReadOnly="True"/>
+                <DataGridTextColumn Header="发现方式" Binding="{Binding DiscoveryMethod}" IsReadOnly="True"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <ProgressBar Grid.Row="2" 
+                     Height="20" 
+                     Margin="0,10,0,0"
+                     IsIndeterminate="{Binding IsScanning}"/>
+    </Grid>
+</Window>
