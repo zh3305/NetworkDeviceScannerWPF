@@ -11,6 +11,9 @@ using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using NetworkDeviceScannerWPF.Commands;
+using System.Windows;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace NetworkDeviceScannerWPF.ViewModels
 {
@@ -24,6 +27,7 @@ namespace NetworkDeviceScannerWPF.ViewModels
         private bool _isScanning;
         private string _statusText;
         private readonly string _csvFilePath = "devices.csv";
+        private CancellationTokenSource _cancellationTokenSource;
 
         public MainViewModel(NetworkScannerService scannerService, ILogger<MainViewModel> logger)
         {
@@ -31,10 +35,12 @@ namespace NetworkDeviceScannerWPF.ViewModels
             _logger = logger;
             Devices = new ObservableCollection<NetworkDevice>();
             NetworkInterfaces = new ObservableCollection<NetworkInterface>();
-            ScanCommand = new AsyncRelayCommand(StartScanAsync, () => !IsScanning);
+            ScanCommand = new AsyncRelayCommand(StartScanAsync, () => CanStartScan);
+            StopCommand = new RelayCommand(StopScan, () => IsScanning);
             SaveCommand = new RelayCommand(SaveDevices);
             LoadNetworkInterfaces();
             LoadDevicesFromCsv();
+            Devices.CollectionChanged += (s, e) => SaveDevices();
         }
 
         public ObservableCollection<NetworkDevice> Devices
@@ -74,8 +80,9 @@ namespace NetworkDeviceScannerWPF.ViewModels
             {
                 _isScanning = value;
                 OnPropertyChanged(nameof(IsScanning));
-                OnPropertyChanged(nameof(ScanButtonText));
+                OnPropertyChanged(nameof(CanStartScan));
                 (ScanCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
+                (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
             }
         }
 
@@ -89,9 +96,10 @@ namespace NetworkDeviceScannerWPF.ViewModels
             }
         }
 
-        public string ScanButtonText => IsScanning ? "扫描中..." : "开始扫描";
+        public bool CanStartScan => SelectedInterface != null && !IsScanning;
 
         public ICommand ScanCommand { get; }
+        public ICommand StopCommand { get; }
         public ICommand SaveCommand { get; }
 
         private void LoadNetworkInterfaces()
@@ -108,6 +116,19 @@ namespace NetworkDeviceScannerWPF.ViewModels
             }
         }
 
+        private void StopScan()
+        {
+            if (_cancellationTokenSource == null || _cancellationTokenSource.IsCancellationRequested)
+            {
+                return;
+            }
+
+            _cancellationTokenSource?.Cancel();
+            _logger.LogInformation("用户请求停止扫描");
+            StatusText = "正在停止扫描...";
+            (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        }
+
         private async Task StartScanAsync()
         {
             if (SelectedInterface == null)
@@ -116,25 +137,93 @@ namespace NetworkDeviceScannerWPF.ViewModels
                 return;
             }
 
+            IsScanning = true;
             StatusText = "正在扫描...";
+            _cancellationTokenSource = new CancellationTokenSource();
+
+            // 先将所有设备标记为离线
+            foreach (var device in Devices)
+            {
+                device.IsOnline = false;
+            }
+
+            var discoveredCount = 0;
 
             try
             {
-                var newDevices = await _scannerService.ScanNetworkAsync(SelectedInterface);
-
-                Devices.Clear(); // 清除旧设备
-                foreach (var device in newDevices)
+                // 在后台线程执行扫描
+                await Task.Run(async () => 
                 {
-                    Devices.Add(device);
-                }
+                    try
+                    {
+                        await _scannerService.ScanNetworkAsync(
+                            SelectedInterface,
+                            device => 
+                            {
+                                _cancellationTokenSource.Token.ThrowIfCancellationRequested();
+                                Application.Current.Dispatcher.Invoke(() =>
+                                {
+                                    var existingDevice = Devices.FirstOrDefault(d => 
+                                        !string.IsNullOrEmpty(d.MAC) && 
+                                        !string.IsNullOrEmpty(device.MAC) && 
+                                        d.MAC.Equals(device.MAC, StringComparison.OrdinalIgnoreCase));
 
-                StatusText = $"扫描完成，发现 {newDevices.Count} 个设备";
-                _logger.LogInformation($"扫描完成，发现 {newDevices.Count} 个设备");
+                                    if (existingDevice != null)
+                                    {
+                                        existingDevice.IP = device.IP;
+                                        if (!string.IsNullOrEmpty(device.Name))
+                                        {
+                                            existingDevice.Name = device.Name;
+                                        }
+                                        existingDevice.IsOnline = true;
+                                        existingDevice.LastSeen = device.LastSeen;
+                                        if (!string.IsNullOrEmpty(device.Location))
+                                        {
+                                            existingDevice.Location = device.Location;
+                                        }
+                                        existingDevice.DiscoveryMethod = string.Join(",", 
+                                            new HashSet<string>(
+                                                (existingDevice.DiscoveryMethod + "," + device.DiscoveryMethod)
+                                                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                            )
+                                        );
+                                    }
+                                    else
+                                    {
+                                        device.IsOnline = true;
+                                        Devices.Add(device);
+                                    }
+                                    discoveredCount++;
+                                    StatusText = $"正在扫描...已发现 {discoveredCount} 个设备";
+                                });
+                            },
+                            _cancellationTokenSource.Token
+                        );
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                });
+
+                StatusText = $"扫描完成，共发现 {discoveredCount} 个设备";
+                _logger.LogInformation($"扫描完成，发现 {discoveredCount} 个设备");
+            }
+            catch (OperationCanceledException)
+            {
+                StatusText = "扫描已取消";
+                _logger.LogInformation("扫描已取消");
             }
             catch (Exception ex)
             {
                 StatusText = "扫描失败";
                 _logger.LogError(ex, "扫描失败");
+            }
+            finally
+            {
+                IsScanning = false;
+                _cancellationTokenSource?.Dispose();
+                _cancellationTokenSource = null;
             }
         }
 
@@ -142,6 +231,13 @@ namespace NetworkDeviceScannerWPF.ViewModels
         {
             try
             {
+                // 确保目录存在
+                var directory = Path.GetDirectoryName(_csvFilePath);
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
                 var lines = new List<string>
                 {
                     "Name,IP,MAC,IsOnline,CustomName,Location,LastSeen,DiscoveryMethod"
@@ -149,25 +245,36 @@ namespace NetworkDeviceScannerWPF.ViewModels
 
                 foreach (var device in Devices)
                 {
-                    lines.Add($"{device.Name},{device.IP},{device.MAC},{device.IsOnline}," +
-                             $"{device.CustomName},{device.Location},{device.LastSeen}," +
-                             $"{device.DiscoveryMethod}");
+                    // 处理CSV中的特殊字符
+                    var name = device.Name?.Replace(",", "，");
+                    var customName = device.CustomName?.Replace(",", "，");
+                    var location = device.Location?.Replace(",", "，");
+                    var discoveryMethod = device.DiscoveryMethod?.Replace(",", "；");
+
+                    lines.Add(
+                        $"{name},{device.IP},{device.MAC},{device.IsOnline}," +
+                        $"{customName},{location},{device.LastSeen}," +
+                        $"{discoveryMethod}"
+                    );
                 }
 
                 File.WriteAllLines(_csvFilePath, lines);
-                StatusText = "设备信息已保存到CSV文件";
                 _logger.LogInformation($"已保存 {Devices.Count} 个设备到 {_csvFilePath}");
+                StatusText = $"已保存 {Devices.Count} 个设备到 {_csvFilePath}";
             }
             catch (Exception ex)
             {
-                StatusText = "保存失败";
                 _logger.LogError(ex, "保存设备信息失败");
             }
         }
 
         private void LoadDevicesFromCsv()
         {
-            if (!File.Exists(_csvFilePath)) return;
+            if (!File.Exists(_csvFilePath)) 
+            {
+                _logger.LogInformation("CSV文件不存在，将在首次扫描时创建");
+                return;
+            }
 
             try
             {
@@ -177,17 +284,23 @@ namespace NetworkDeviceScannerWPF.ViewModels
                     var values = line.Split(',');
                     if (values.Length >= 8)
                     {
-                        Devices.Add(new NetworkDevice
+                        // 检查MAC地址是否已存在
+                        var mac = values[2];
+                        if (!string.IsNullOrEmpty(mac) && 
+                            !Devices.Any(d => d.MAC?.Equals(mac, StringComparison.OrdinalIgnoreCase) == true))
                         {
-                            Name = values[0],
-                            IP = values[1],
-                            MAC = values[2],
-                            IsOnline = bool.Parse(values[3]),
-                            CustomName = values[4],
-                            Location = values[5],
-                            LastSeen = DateTime.Parse(values[6]),
-                            DiscoveryMethod = values[7]
-                        });
+                            Devices.Add(new NetworkDevice
+                            {
+                                Name = values[0],
+                                IP = values[1],
+                                MAC = values[2],
+                                IsOnline = false, // 从文件加载时默认为离线
+                                CustomName = values[4],
+                                Location = values[5],
+                                LastSeen = DateTime.Parse(values[6]),
+                                DiscoveryMethod = values[7]
+                            });
+                        }
                     }
                 }
                 StatusText = $"已加载 {Devices.Count} 个设备";

@@ -21,7 +21,7 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
             _logger = logger;
         }
 
-        public async Task<List<NetworkDevice>> ScanNetworkAsync(NetworkInterface networkInterface)
+        public async Task<List<NetworkDevice>> ScanNetworkAsync(NetworkInterface networkInterface, CancellationToken cancellationToken = default)
         {
             var interfaceProperties = networkInterface.GetIPProperties();
             var ipv4Address = interfaceProperties.UnicastAddresses
@@ -54,10 +54,11 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
             using var semaphore = new SemaphoreSlim(MAX_CONCURRENT_TASKS);
             var tasks = ipRange.Select(async ip =>
             {
-                await semaphore.WaitAsync();
+                await semaphore.WaitAsync(cancellationToken);
                 try
                 {
-                    await PingHostAsync(ip);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await PingHostAsync(ip, cancellationToken);
                 }
                 finally
                 {
@@ -65,7 +66,15 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
                 }
             });
 
-            await Task.WhenAll(tasks);
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("ARP扫描已取消");
+                throw;
+            }
 
             _logger.LogInformation("Ping扫描完成，开始获取ARP缓存");
 
@@ -98,8 +107,8 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
             {
                 try
                 {
-                    var hostEntry = await Dns.GetHostEntryAsync(device.IP);
-                    device.Name = hostEntry.HostName;
+                    var hostName = await GetDeviceNameAsync(device.IP);
+                    device.Name = hostName;
                     _logger.LogDebug($"解析主机名成功: {device.IP} -> {device.Name}");
                 }
                 catch
@@ -115,7 +124,49 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
             return devices;
         }
 
-        private async Task PingHostAsync(IPAddress address)
+        private async Task<string> GetDeviceNameAsync(string ipAddress)
+        {
+            try
+            {
+                // 1. 尝试DNS反向解析
+                var hostEntry = await Dns.GetHostEntryAsync(ipAddress);
+                if (!string.IsNullOrEmpty(hostEntry.HostName))
+                {
+                    return hostEntry.HostName;
+                }
+
+                // 2. 尝试NetBIOS名称解析
+                var process = new System.Diagnostics.Process
+                {
+                    StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "nbtstat",
+                        Arguments = $"-A {ipAddress}",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                var match = System.Text.RegularExpressions.Regex.Match(output, @"(\S+)\s+<00>");
+                if (match.Success)
+                {
+                    return match.Groups[1].Value.Trim();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug($"获取设备名称失败: {ipAddress}, 原因: {ex.Message}");
+            }
+
+            return string.Empty;
+        }
+
+        private async Task PingHostAsync(IPAddress address, CancellationToken cancellationToken)
         {
             try
             {
@@ -123,19 +174,19 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
                 var reply = await ping.SendPingAsync(address, 1000);
                 if (reply.Status == IPStatus.Success)
                 {
-                    var device = new NetworkDevice
+                    _logger.LogDebug($"Ping成功: {address}");
+                    var deviceName = await GetDeviceNameAsync(address.ToString());
+                    _discoveredDevices.TryAdd(address.ToString(), new NetworkDevice
                     {
                         IP = address.ToString(),
+                        Name = deviceName,
                         IsOnline = true,
                         LastSeen = DateTime.Now,
-                        DiscoveryMethod = "Ping"
-                    };
-
-                    _discoveredDevices.TryAdd(device.IP, device);
-                    _logger.LogDebug($"Ping成功: {address}");
+                        DiscoveryMethod = "ARP"
+                    });
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogDebug($"Ping失败: {address}, 原因: {ex.Message}");
             }

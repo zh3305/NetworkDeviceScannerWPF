@@ -37,7 +37,7 @@ namespace NetworkDeviceScannerWPF.Services.NetworkScanner
         {
             var agent = new IpAddress(ipAddress);
             var param = new AgentParameters(SnmpVersion.Ver2, new OctetString(community));
-            var target = new UdpTarget((IPAddress)agent, 161, 2000, 1);
+            var target = new UdpTarget((IPAddress)agent, 161, 500, 1);
 
             try
             {

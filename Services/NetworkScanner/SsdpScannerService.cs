@@ -44,7 +44,7 @@ ST: ssdp:all
                 await udpClient.SendAsync(messageBytes, messageBytes.Length, endpoint);
 
                 // 设置接收超时
-                udpClient.Client.ReceiveTimeout = 5000;
+                udpClient.Client.ReceiveTimeout = 1000;
 
                 var startTime = DateTime.Now;
                 while (DateTime.Now - startTime < TimeSpan.FromSeconds(5))

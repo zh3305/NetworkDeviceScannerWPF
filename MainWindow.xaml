@@ -5,9 +5,14 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:NetworkDeviceScannerWPF" 
         xmlns:viewmodels="clr-namespace:NetworkDeviceScannerWPF.ViewModels" 
+        xmlns:converters="clr-namespace:NetworkDeviceScannerWPF.Converters"
         d:DataContext="{d:DesignInstance Type=viewmodels:MainViewModel}"
         mc:Ignorable="d"
         Title="网络设备扫描器" Height="650" Width="1000">
+    <Window.Resources>
+        <converters:ScanButtonBackgroundConverter x:Key="ScanButtonBackgroundConverter"/>
+        <converters:NullToBooleanConverter x:Key="NullToBooleanConverter"/>
+    </Window.Resources>
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -22,10 +27,18 @@
                       ItemsSource="{Binding NetworkInterfaces}"
                       SelectedItem="{Binding SelectedInterface}"
                       DisplayMemberPath="Description"/>
-            <Button Content="{Binding ScanButtonText}"
+            <Button Content="开始扫描"
                     Width="100" 
                     Margin="0,0,10,0"
-                    Command="{Binding ScanCommand}"/>
+                    Command="{Binding ScanCommand}"
+                    IsEnabled="{Binding CanStartScan}"
+                    />
+            <Button Content="停止扫描"
+                    Width="100"
+                    Margin="0,0,10,0"
+                    Command="{Binding StopCommand}"
+                    IsEnabled="{Binding IsScanning}"
+                    Background="Red"/>
             <Button Content="保存" 
                     Width="100" 
                     Margin="0,0,10,0"
@@ -37,11 +50,14 @@
         <DataGrid Grid.Row="1" 
                   ItemsSource="{Binding Devices}"
                   AutoGenerateColumns="False" 
-                  IsReadOnly="True">
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  IsReadOnly="False">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="设备名称" Binding="{Binding Name}" IsReadOnly="True"/>
                 <DataGridTextColumn Header="IP地址" Binding="{Binding IP}" IsReadOnly="True"/>
                 <DataGridTextColumn Header="MAC地址" Binding="{Binding MAC}" IsReadOnly="True"/>
+                <DataGridTextColumn Header="制造商" Binding="{Binding Manufacturer}" IsReadOnly="True"/>
                 <DataGridCheckBoxColumn Header="在线状态" Binding="{Binding IsOnline}" IsReadOnly="True"/>
                 <DataGridTextColumn Header="自定义名称" Binding="{Binding CustomName}"/>
                 <DataGridTextColumn Header="位置" Binding="{Binding Location}"/>

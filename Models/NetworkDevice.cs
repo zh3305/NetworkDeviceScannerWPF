@@ -13,6 +13,7 @@ namespace NetworkDeviceScannerWPF.Models
         private string _location;
         private DateTime _lastSeen;
         private string _discoveryMethod;
+        private string _manufacturer;
 
         public string Name
         {
@@ -91,6 +92,16 @@ namespace NetworkDeviceScannerWPF.Models
             {
                 _discoveryMethod = value;
                 OnPropertyChanged(nameof(DiscoveryMethod));
+            }
+        }
+
+        public string Manufacturer
+        {
+            get => _manufacturer;
+            set
+            {
+                _manufacturer = value;
+                OnPropertyChanged(nameof(Manufacturer));
             }
         }
 

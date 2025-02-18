@@ -39,6 +39,7 @@ namespace NetworkDeviceScannerWPF
             services.AddSingleton<MdnsScannerService>();
             services.AddSingleton<SsdpScannerService>();
             services.AddSingleton<NetworkScannerService>();
+            services.AddSingleton<MacLookupService>();
             services.AddSingleton<MainViewModel>();
         }
 

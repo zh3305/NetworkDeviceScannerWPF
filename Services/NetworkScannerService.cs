@@ -6,6 +6,8 @@ using Microsoft.Extensions.Logging;
 using NetworkDeviceScannerWPF.Models;
 using NetworkDeviceScannerWPF.Services.NetworkScanner;
 using NetworkDeviceScannerWPF.Services;
+using System.Threading;
+using System.Linq;
 
 namespace NetworkDeviceScannerWPF.Services
 {
@@ -15,20 +17,24 @@ namespace NetworkDeviceScannerWPF.Services
         private readonly SnmpScannerService _snmpScanner;
         private readonly MdnsScannerService _mdnsScanner;
         private readonly SsdpScannerService _ssdpScanner;
+        private readonly MacLookupService _macLookupService;
         private readonly ILogger<NetworkScannerService> _logger;
+        private const int MAX_CONCURRENT_TASKS = 20;
 
         public NetworkScannerService(
             ILogger<NetworkScannerService> logger,
             ArpScannerService arpScanner,
             SnmpScannerService snmpScanner,
             MdnsScannerService mdnsScanner,
-            SsdpScannerService ssdpScanner)
+            SsdpScannerService ssdpScanner,
+            MacLookupService macLookupService)
         {
             _logger = logger;
             _arpScanner = arpScanner;
             _snmpScanner = snmpScanner;
             _mdnsScanner = mdnsScanner;
             _ssdpScanner = ssdpScanner;
+            _macLookupService = macLookupService;
         }
 
         public List<NetworkInterface> GetNetworkInterfaces()
@@ -46,68 +52,124 @@ namespace NetworkDeviceScannerWPF.Services
             return interfaces;
         }
 
-        public async Task<List<NetworkDevice>> ScanNetworkAsync(NetworkInterface networkInterface)
+        public async Task ScanNetworkAsync(NetworkInterface networkInterface, Action<NetworkDevice> onDeviceFound, CancellationToken cancellationToken = default)
         {
-            var devices = new List<NetworkDevice>();
-            
             try
             {
                 // ARP扫描
-                var arpDevices = await _arpScanner.ScanNetworkAsync(networkInterface);
-                devices.AddRange(arpDevices);
-
-                // SNMP扫描
-                foreach (var device in devices.ToList())
+                _logger.LogInformation("开始ARP扫描");
+                cancellationToken.ThrowIfCancellationRequested();
+                var arpDevices = await _arpScanner.ScanNetworkAsync(networkInterface, cancellationToken);
+                foreach (var device in arpDevices)
                 {
-                    var snmpDevice = await _snmpScanner.ScanDeviceAsync(device.IP);
-                    if (snmpDevice != null)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!string.IsNullOrEmpty(device.MAC))
                     {
-                        device.Name = snmpDevice.Name;
-                        device.Location = snmpDevice.Location;
-                        device.DiscoveryMethod += ",SNMP";
+                        device.Manufacturer = await _macLookupService.GetManufacturerAsync(device.MAC);
+                    }
+                    onDeviceFound(device);
+                }
+
+                // 并行执行SNMP扫描
+                _logger.LogInformation("开始SNMP扫描");
+                cancellationToken.ThrowIfCancellationRequested();
+                using (var semaphore = new SemaphoreSlim(MAX_CONCURRENT_TASKS))
+                {
+                    var snmpTasks = arpDevices.Select(async device =>
+                    {
+                        try
+                        {
+                            await semaphore.WaitAsync(cancellationToken);
+                            _logger.LogDebug($"正在SNMP扫描 {device.IP}");
+                            cancellationToken.ThrowIfCancellationRequested();
+                            var snmpDevice = await _snmpScanner.ScanDeviceAsync(device.IP);
+                            if (snmpDevice != null)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                device.Name = snmpDevice.Name;
+                                device.Location = snmpDevice.Location;
+                                device.DiscoveryMethod = string.Join(",", 
+                                    new HashSet<string>(
+                                        (device.DiscoveryMethod + ",SNMP")
+                                        .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                    )
+                                );
+                                onDeviceFound(device);
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        finally
+                        {
+                            semaphore.Release();
+                        }
+                    });
+
+                    try
+                    {
+                        await Task.WhenAll(snmpTasks);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
                     }
                 }
 
-                // mDNS扫描
-                var mdnsDevices = await _mdnsScanner.ScanAsync();
-                foreach (var mdnsDevice in mdnsDevices)
+                // 并行执行mDNS和SSDP扫描
+                _logger.LogInformation("开始mDNS和SSDP扫描");
+                var mdnsTask = Task.Run(async () =>
                 {
-                    var existingDevice = devices.Find(d => d.IP == mdnsDevice.IP);
-                    if (existingDevice != null)
+                    try
                     {
-                        existingDevice.Name = mdnsDevice.Name;
-                        existingDevice.DiscoveryMethod += ",mDNS";
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var mdnsDevices = await _mdnsScanner.ScanAsync();
+                        foreach (var device in mdnsDevices)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            _logger.LogDebug($"发现mDNS设备 {device.IP}");
+                            onDeviceFound(device);
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        devices.Add(mdnsDevice);
+                        _logger.LogError(ex, "mDNS扫描失败");
                     }
-                }
+                }, cancellationToken);
 
-                // SSDP扫描
-                var ssdpDevices = await _ssdpScanner.ScanAsync();
-                foreach (var ssdpDevice in ssdpDevices)
+                var ssdpTask = Task.Run(async () =>
                 {
-                    var existingDevice = devices.Find(d => d.IP == ssdpDevice.IP);
-                    if (existingDevice != null)
+                    try
                     {
-                        existingDevice.Name = string.IsNullOrEmpty(existingDevice.Name) ? ssdpDevice.Name : existingDevice.Name;
-                        existingDevice.CustomName = string.IsNullOrEmpty(existingDevice.CustomName) ? ssdpDevice.CustomName : existingDevice.CustomName;
-                        existingDevice.Location = string.IsNullOrEmpty(existingDevice.Location) ? ssdpDevice.Location : existingDevice.Location;
-                        existingDevice.DiscoveryMethod += ",SSDP";
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var ssdpDevices = await _ssdpScanner.ScanAsync();
+                        foreach (var device in ssdpDevices)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            _logger.LogDebug($"发现SSDP设备 {device.IP}");
+                            onDeviceFound(device);
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        devices.Add(ssdpDevice);
+                        _logger.LogError(ex, "SSDP扫描失败");
                     }
-                }
+                }, cancellationToken);
+
+                // 等待所有扫描完成
+                await Task.WhenAll(mdnsTask, ssdpTask);
             }
-            catch (Exception)
+            catch (OperationCanceledException)
             {
+                _logger.LogInformation("扫描已取消");
                 throw;
             }
-
-            return devices;
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "扫描过程中发生错误");
+                throw;
+            }
         }
     }
 } 
